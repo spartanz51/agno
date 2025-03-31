@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections import ChainMap, defaultdict, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from os import getenv
 from textwrap import dedent
 from typing import (
@@ -79,6 +79,36 @@ class Agent:
     session_name: Optional[str] = None
     # Session state (stored in the database to persist across runs)
     session_state: Optional[Dict[str, Any]] = None
+
+    # --- Message Callbacks ---
+    _message_callbacks: List[Callable[[Message], None]] = field(default_factory=list)
+
+    def on_message(self, callback: Callable[[Message], None]) -> None:
+        """Register a callback to be called when a new message is added.
+        
+        Args:
+            callback: A function that takes a Message as argument and returns None
+        """
+        self._message_callbacks.append(callback)
+
+    def _emit_message(self, message: Message, on_message: Optional[Callable[[Message], None]] = None) -> None:
+        """Emit a message event to all registered callbacks.
+        
+        Args:
+            message: The message to emit
+            on_message: Optional callback to handle the message
+        """
+        for callback in self._message_callbacks:
+            try:
+                callback(message)
+            except Exception as e:
+                log_warning(f"Error in message callback: {e}")
+        
+        if on_message:
+            try:
+                on_message(message)
+            except Exception as e:
+                log_warning(f"Error in message callback: {e}")
 
     # --- Agent Context ---
     # Context available for tools and prompt functions
@@ -328,6 +358,9 @@ class Agent:
         self.session_id = session_id
         self.session_name = session_name
         self.session_state = session_state
+
+        # Initialize message callbacks
+        self._message_callbacks = []
 
         self.context = context
         self.add_context = add_context
@@ -598,6 +631,7 @@ class Agent:
                     if model_response_chunk.citations is not None:
                         # We get citations in one chunk
                         self.run_response.citations = model_response_chunk.citations
+                        model_response.citations = model_response_chunk.citations
 
                     # Only yield if we have content or thinking to show
                     if (
@@ -606,6 +640,16 @@ class Agent:
                         or model_response_chunk.redacted_thinking is not None
                         or model_response_chunk.citations is not None
                     ):
+                        # Create a message with the current chunk
+                        chunk_message = Message(
+                            role="assistant",
+                            content=model_response_chunk.content,
+                            thinking=model_response_chunk.thinking,
+                            citations=model_response_chunk.citations,
+                            add_to_agent_memory=True
+                        )
+                        self._emit_message(chunk_message)
+
                         yield self.create_run_response(
                             content=model_response_chunk.content,
                             thinking=model_response_chunk.thinking,
@@ -723,6 +767,17 @@ class Agent:
             if model_response.citations is not None:
                 self.run_response.citations = model_response.citations
 
+            # Create and emit the assistant message
+            if model_response.content is not None:
+                assistant_message = Message(
+                    role="assistant",
+                    content=model_response.content,
+                    thinking=model_response.thinking or model_response.redacted_thinking,
+                    citations=model_response.citations,
+                    add_to_agent_memory=True
+                )
+                self._emit_message(assistant_message)
+
             # Update the run_response tools with the model response tools
             if model_response.tool_calls is not None:
                 if self.run_response.tools is None:
@@ -755,6 +810,7 @@ class Agent:
         # Add the system message to the memory
         if run_messages.system_message is not None:
             self.memory.add_system_message(run_messages.system_message, system_message_role=self.system_message_role)
+            self._emit_message(run_messages.system_message)
 
         # Build a list of messages that should be added to the AgentMemory
         messages_for_memory: List[Message] = (
@@ -766,6 +822,8 @@ class Agent:
                 messages_for_memory.append(_rm)
         if len(messages_for_memory) > 0:
             self.memory.add_messages(messages=messages_for_memory)
+            for message in messages_for_memory:
+                self._emit_message(message)
 
         # Yield UpdatingMemory event
         if self.stream_intermediate_steps:
@@ -806,6 +864,7 @@ class Agent:
                     if agent_run.messages is None:
                         agent_run.messages = []
                     agent_run.messages.append(mp)
+                    self._emit_message(mp)
                     if self.memory.create_user_memories and self.memory.update_user_memories_after_run:
                         self.memory.update_memory(input=mp.get_content_string())
                 else:
@@ -1244,6 +1303,17 @@ class Agent:
             if model_response.citations is not None:
                 self.run_response.citations = model_response.citations
 
+            # Create and emit the assistant message
+            if model_response.content is not None:
+                assistant_message = Message(
+                    role="assistant",
+                    content=model_response.content,
+                    thinking=model_response.thinking or model_response.redacted_thinking,
+                    citations=model_response.citations,
+                    add_to_agent_memory=True
+                )
+                self._emit_message(assistant_message)
+
             # Update the run_response tools with the model response tools
             if model_response.tool_calls is not None:
                 if self.run_response.tools is None:
@@ -1276,6 +1346,7 @@ class Agent:
         # Add the system message to the memory
         if run_messages.system_message is not None:
             self.memory.add_system_message(run_messages.system_message, system_message_role=self.system_message_role)
+            self._emit_message(run_messages.system_message)
 
         # Build a list of messages that should be added to the AgentMemory
         messages_for_memory: List[Message] = (
@@ -1287,6 +1358,8 @@ class Agent:
                 messages_for_memory.append(_rm)
         if len(messages_for_memory) > 0:
             self.memory.add_messages(messages=messages_for_memory)
+            for message in messages_for_memory:
+                self._emit_message(message)
 
         # Yield UpdatingMemory event
         if self.stream_intermediate_steps:
@@ -1325,6 +1398,7 @@ class Agent:
                     if agent_run.messages is None:
                         agent_run.messages = []
                     agent_run.messages.append(mp)
+                    self._emit_message(mp)
                     if self.memory.create_user_memories and self.memory.update_user_memories_after_run:
                         await self.memory.aupdate_memory(input=mp.get_content_string())
                 else:
@@ -1371,130 +1445,52 @@ class Agent:
 
     async def arun(
         self,
-        message: Optional[Union[str, List, Dict, Message]] = None,
-        *,
-        stream: Optional[bool] = None,
-        audio: Optional[Sequence[Audio]] = None,
-        images: Optional[Sequence[Image]] = None,
-        videos: Optional[Sequence[Video]] = None,
-        files: Optional[Sequence[File]] = None,
-        messages: Optional[Sequence[Union[Dict, Message]]] = None,
-        stream_intermediate_steps: bool = False,
-        retries: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Async Run the Agent and return the response."""
+        messages: Optional[List[Message]] = None,
+        stream: bool = False,
+        markdown: bool = True,
+        on_message: Optional[Callable[[Message], None]] = None,
+        **kwargs,
+    ) -> Message:
+        """Run the agent asynchronously.
 
-        # If no retries are set, use the agent's default retries
-        if retries is None:
-            retries = self.retries
+        Args:
+            messages: List of messages to process. If not provided, uses the agent's messages.
+            stream: Whether to stream the response.
+            markdown: Whether to format the response as markdown.
+            on_message: Optional callback to handle messages as they are generated.
+            **kwargs: Additional arguments to pass to the model.
 
-        # Use stream overrided value when necessary
-        if stream is None:
-            stream = False if self.stream is None else self.stream
+        Returns:
+            Message: The agent's response.
+        """
+        if messages is None:
+            messages = self.messages
 
-        last_exception = None
-        num_attempts = retries + 1
-        for attempt in range(num_attempts):
-            log_debug(f"Attempt {attempt + 1}/{num_attempts}")
-            try:
-                # If a response_model is set, return the response as a structured output
-                if self.response_model is not None and self.parse_response:
-                    # Set stream=False and run the agent
-                    log_debug("Setting stream=False as response_model is set")
-                    run_response = await self._arun(
-                        message=message,
-                        stream=False,
-                        audio=audio,
-                        images=images,
-                        videos=videos,
-                        files=files,
-                        messages=messages,
-                        stream_intermediate_steps=stream_intermediate_steps,
-                        **kwargs,
-                    ).__anext__()
+        # Get response from model
+        model_response = ModelResponse()
 
-                    # Do a final check confirming the content is in the response_model format
-                    if isinstance(run_response.content, self.response_model):
-                        return run_response
+        if stream:
+            await self._process_model_response_stream(messages, model_response, on_message)
+            return messages[-1]
 
-                    # Otherwise convert the response to the structured format
-                    if isinstance(run_response.content, str):
-                        try:
-                            structured_output = parse_response_model_str(run_response.content, self.response_model)
+        # Get response from model
+        model_response = await self.model.aresponse(messages=messages)
 
-                            # Update RunResponse
-                            if structured_output is not None:
-                                run_response.content = structured_output
-                                run_response.content_type = self.response_model.__name__
-                                if self.run_response is not None:
-                                    self.run_response.content = structured_output
-                                    self.run_response.content_type = self.response_model.__name__
-                            else:
-                                log_warning("Failed to convert response to response_model")
-                        except Exception as e:
-                            log_warning(f"Failed to convert response to output model: {e}")
-                    else:
-                        log_warning("Something went wrong. Run response content is not a string")
-                    return run_response
-                else:
-                    if stream and self.is_streamable:
-                        resp = self._arun(
-                            message=message,
-                            stream=True,
-                            audio=audio,
-                            images=images,
-                            videos=videos,
-                            files=files,
-                            messages=messages,
-                            stream_intermediate_steps=stream_intermediate_steps,
-                            **kwargs,
-                        )
-                        return resp
-                    else:
-                        resp = self._arun(
-                            message=message,
-                            stream=False,
-                            audio=audio,
-                            images=images,
-                            videos=videos,
-                            files=files,
-                            messages=messages,
-                            stream_intermediate_steps=stream_intermediate_steps,
-                            **kwargs,
-                        )
-                        return await resp.__anext__()
-            except ModelProviderError as e:
-                log_warning(f"Attempt {attempt + 1}/{num_attempts} failed: {str(e)}")
-                if isinstance(e, StopAgentRun):
-                    raise e
-                last_exception = e
-                if attempt < num_attempts - 1:  # Don't sleep on the last attempt
-                    if self.exponential_backoff:
-                        delay = 2**attempt * self.delay_between_retries
-                    else:
-                        delay = self.delay_between_retries
-                    import time
+        # Create message from response
+        message = Message(
+            role=model_response.role or "assistant",
+            content=model_response.content,
+            thinking=model_response.thinking,
+            citations=model_response.citations,
+        )
 
-                    time.sleep(delay)
-            except KeyboardInterrupt:
-                # Create a cancelled response
-                return RunResponse(
-                    run_id=self.run_id or str(uuid4()),
-                    session_id=self.session_id,
-                    agent_id=self.agent_id,
-                    content="Operation cancelled by user",
-                    event=RunEvent.run_cancelled,
-                )
+        # Add message to conversation
+        messages.append(message)
 
-        # If we get here, all retries failed
-        if last_exception is not None:
-            log_error(
-                f"Failed after {num_attempts} attempts. Last error using {last_exception.model_name}({last_exception.model_id})"
-            )
-            raise last_exception
-        else:
-            raise Exception(f"Failed after {num_attempts} attempts.")
+        # Print response
+        self.print_response(message=message, stream=stream, markdown=markdown, **kwargs)
+
+        return message
 
     def create_run_response(
         self,
@@ -2435,6 +2431,7 @@ class Agent:
         if system_message is not None:
             run_messages.system_message = system_message
             run_messages.messages.append(system_message)
+            self._emit_message(system_message)
 
         # 2. Add extra messages to run_messages if provided
         if self.add_messages is not None:
@@ -2447,12 +2444,14 @@ class Agent:
                     messages_to_add_to_run_response.append(_m)
                     run_messages.messages.append(_m)
                     run_messages.extra_messages.append(_m)
+                    self._emit_message(_m)
                 elif isinstance(_m, dict):
                     try:
                         _m_parsed = Message.model_validate(_m)
                         messages_to_add_to_run_response.append(_m_parsed)
                         run_messages.messages.append(_m_parsed)
                         run_messages.extra_messages.append(_m_parsed)
+                        self._emit_message(_m_parsed)
                     except Exception as e:
                         log_warning(f"Failed to validate message: {e}")
             # Add the extra messages to the run_response
@@ -2491,6 +2490,9 @@ class Agent:
                     else:
                         self.run_response.extra_data.history.extend(history_copy)
                 run_messages.messages += history_copy
+                # Emit history messages
+                for msg in history_copy:
+                    self._emit_message(msg)
 
         # 4.Add user message to run_messages
         user_message: Optional[Message] = None
@@ -2512,6 +2514,7 @@ class Agent:
         if user_message is not None:
             run_messages.user_message = user_message
             run_messages.messages.append(user_message)
+            self._emit_message(user_message)
 
         # 5. Add messages to run_messages if provided
         if messages is not None and len(messages) > 0:
@@ -2521,12 +2524,15 @@ class Agent:
                     if run_messages.extra_messages is None:
                         run_messages.extra_messages = []
                     run_messages.extra_messages.append(_m)
+                    self._emit_message(_m)
                 elif isinstance(_m, dict):
                     try:
-                        run_messages.messages.append(Message.model_validate(_m))
+                        msg = Message.model_validate(_m)
+                        run_messages.messages.append(msg)
                         if run_messages.extra_messages is None:
                             run_messages.extra_messages = []
-                        run_messages.extra_messages.append(Message.model_validate(_m))
+                        run_messages.extra_messages.append(msg)
+                        self._emit_message(msg)
                     except Exception as e:
                         log_warning(f"Failed to validate message: {e}")
 
@@ -4340,3 +4346,51 @@ class Agent:
                 break
 
             self.print_response(message=message, stream=stream, markdown=markdown, **kwargs)
+
+    async def _process_model_response_stream(
+        self,
+        messages: List[Message],
+        model_response: ModelResponse,
+        on_message: Optional[Callable[[Message], None]] = None,
+    ) -> None:
+        """Process a streaming response from the model."""
+        # Create a new message to accumulate the response
+        message = Message(
+            role=model_response.role or "assistant",
+            content=model_response.content,
+            thinking=model_response.thinking,
+            citations=model_response.citations,
+        )
+
+        # Emit the initial message if we have content
+        if message.content or message.thinking or message.citations:
+            self._emit_message(message, on_message)
+
+        # Process the stream
+        async for response_delta in self.model.aresponse_stream(messages=messages):
+            # Update the message with new content
+            if response_delta.content:
+                if message.content is None:
+                    message.content = response_delta.content
+                else:
+                    message.content += response_delta.content
+
+            if response_delta.thinking:
+                if message.thinking is None:
+                    message.thinking = response_delta.thinking
+                else:
+                    message.thinking += response_delta.thinking
+
+            if response_delta.citations:
+                message.citations = response_delta.citations
+
+            # Emit the updated message
+            self._emit_message(message, on_message)
+
+            # Handle tool calls
+            if response_delta.tool_calls:
+                message.tool_calls = response_delta.tool_calls
+                self._emit_message(message, on_message)
+
+        # Add the final message to the conversation
+        messages.append(message)
