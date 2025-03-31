@@ -435,6 +435,8 @@ class Agent:
 
         self._formatter: Optional[SafeFormatter] = None
 
+        self._message_callbacks: List[Callable[[Message], None]] = []
+
     def set_agent_id(self) -> str:
         if self.agent_id is None:
             self.agent_id = str(uuid4())
@@ -598,6 +600,7 @@ class Agent:
                     if model_response_chunk.citations is not None:
                         # We get citations in one chunk
                         self.run_response.citations = model_response_chunk.citations
+                        model_response.citations = model_response_chunk.citations
 
                     # Only yield if we have content or thinking to show
                     if (
@@ -606,6 +609,17 @@ class Agent:
                         or model_response_chunk.redacted_thinking is not None
                         or model_response_chunk.citations is not None
                     ):
+                        # Create a message with accumulated content
+                        chunk_message = Message(
+                            role="assistant",
+                            content=model_response.content,  # Use accumulated content
+                            thinking=model_response.thinking,  # Use accumulated thinking
+                            citations=model_response.citations,
+                            add_to_agent_memory=True
+                        )
+                        # Emit the message
+                        self._emit_message(chunk_message)
+
                         yield self.create_run_response(
                             content=model_response_chunk.content,
                             thinking=model_response_chunk.thinking,
@@ -658,6 +672,14 @@ class Agent:
                         # Format tool calls whenever new ones are added during streaming
                         self.run_response.formatted_tool_calls = format_tool_calls(self.run_response.tools)
 
+                        # Create and emit a tool message with current state
+                        tool_message = Message(
+                            role="tool",
+                            content=format_tool_calls(self.run_response.tools),  # Use accumulated tools
+                            add_to_agent_memory=True
+                        )
+                        self._emit_message(tool_message)
+
                     # If the agent is streaming intermediate steps, yield a RunResponse with the tool_call_started event
                     if self.stream_intermediate_steps:
                         yield self.create_run_response(
@@ -685,6 +707,14 @@ class Agent:
                                     self.run_response.tools[index] = tool_call_dict
                         else:
                             self.run_response.tools = tool_calls_list
+
+                        # Create and emit a tool message with final state
+                        tool_message = Message(
+                            role="tool",
+                            content=format_tool_calls(self.run_response.tools),  # Use accumulated tools
+                            add_to_agent_memory=True
+                        )
+                        self._emit_message(tool_message)
 
                     if self.stream_intermediate_steps:
                         yield self.create_run_response(
@@ -730,9 +760,32 @@ class Agent:
                 else:
                     self.run_response.tools.extend(model_response.tool_calls)
 
+                # Create and emit a tool message
+                tool_message = Message(
+                    role="tool",
+                    content=format_tool_calls(model_response.tool_calls),
+                    add_to_agent_memory=True
+                )
+                self._emit_message(tool_message)
+
             # Update the run_response audio with the model response audio
             if model_response.audio is not None:
                 self.run_response.response_audio = model_response.audio
+
+            # Create message from response
+            message = Message(
+                role=model_response.role or "assistant",
+                content=model_response.content,
+                thinking=model_response.thinking,
+                citations=model_response.citations,
+                add_to_agent_memory=True
+            )
+
+            # Add message to conversation
+            run_messages.messages.append(message)
+
+            # Emit the message
+            self._emit_message(message)
 
             # Update the run_response messages with the messages
             self.run_response.messages = run_messages.messages
@@ -1118,6 +1171,7 @@ class Agent:
 
                     if model_response_chunk.citations is not None:
                         self.run_response.citations = model_response_chunk.citations
+                        model_response.citations = model_response_chunk.citations
 
                     # Only yield if we have content or thinking to show
                     if (
@@ -1126,6 +1180,17 @@ class Agent:
                         or model_response_chunk.redacted_thinking is not None
                         or model_response_chunk.citations is not None
                     ):
+                        # Create a message with accumulated content
+                        chunk_message = Message(
+                            role="assistant",
+                            content=model_response.content,  # Use accumulated content
+                            thinking=model_response.thinking,  # Use accumulated thinking
+                            citations=model_response.citations,
+                            add_to_agent_memory=True
+                        )
+                        # Emit the message
+                        self._emit_message(chunk_message)
+
                         yield self.create_run_response(
                             content=model_response_chunk.content,
                             thinking=model_response_chunk.thinking,
@@ -1178,6 +1243,14 @@ class Agent:
                         # Format tool calls whenever new ones are added during streaming
                         self.run_response.formatted_tool_calls = format_tool_calls(self.run_response.tools)
 
+                        # Create and emit a tool message with current state
+                        tool_message = Message(
+                            role="tool",
+                            content=format_tool_calls(self.run_response.tools),  # Use accumulated tools
+                            add_to_agent_memory=True
+                        )
+                        self._emit_message(tool_message)
+
                     # If the agent is streaming intermediate steps, yield a RunResponse with the tool_call_started event
                     if self.stream_intermediate_steps:
                         yield self.create_run_response(
@@ -1207,6 +1280,14 @@ class Agent:
                                     self.run_response.tools[index] = tool_call_dict
                         else:
                             self.run_response.tools = tool_calls_list
+
+                        # Create and emit a tool message with final state
+                        tool_message = Message(
+                            role="tool",
+                            content=format_tool_calls(self.run_response.tools),  # Use accumulated tools
+                            add_to_agent_memory=True
+                        )
+                        self._emit_message(tool_message)
 
                     if self.stream_intermediate_steps:
                         yield self.create_run_response(
@@ -1251,9 +1332,32 @@ class Agent:
                 else:
                     self.run_response.tools.extend(model_response.tool_calls)
 
+                # Create and emit a tool message
+                tool_message = Message(
+                    role="tool",
+                    content=format_tool_calls(model_response.tool_calls),
+                    add_to_agent_memory=True
+                )
+                self._emit_message(tool_message)
+
             # Update the run_response audio with the model response audio
             if model_response.audio is not None:
                 self.run_response.response_audio = model_response.audio
+
+            # Create message from response
+            message = Message(
+                role=model_response.role or "assistant",
+                content=model_response.content,
+                thinking=model_response.thinking,
+                citations=model_response.citations,
+                add_to_agent_memory=True
+            )
+
+            # Add message to conversation
+            run_messages.messages.append(message)
+
+            # Emit the message
+            self._emit_message(message)
 
             # Update the run_response messages with the messages
             self.run_response.messages = run_messages.messages
@@ -2435,6 +2539,8 @@ class Agent:
         if system_message is not None:
             run_messages.system_message = system_message
             run_messages.messages.append(system_message)
+            # Emit the system message
+            self._emit_message(system_message)
 
         # 2. Add extra messages to run_messages if provided
         if self.add_messages is not None:
@@ -2447,24 +2553,18 @@ class Agent:
                     messages_to_add_to_run_response.append(_m)
                     run_messages.messages.append(_m)
                     run_messages.extra_messages.append(_m)
+                    # Emit the extra message
+                    self._emit_message(_m)
                 elif isinstance(_m, dict):
                     try:
                         _m_parsed = Message.model_validate(_m)
                         messages_to_add_to_run_response.append(_m_parsed)
                         run_messages.messages.append(_m_parsed)
                         run_messages.extra_messages.append(_m_parsed)
+                        # Emit the parsed extra message
+                        self._emit_message(_m_parsed)
                     except Exception as e:
                         log_warning(f"Failed to validate message: {e}")
-            # Add the extra messages to the run_response
-            if len(messages_to_add_to_run_response) > 0:
-                log_debug(f"Adding {len(messages_to_add_to_run_response)} extra messages")
-                if self.run_response.extra_data is None:
-                    self.run_response.extra_data = RunResponseExtraData(add_messages=messages_to_add_to_run_response)
-                else:
-                    if self.run_response.extra_data.add_messages is None:
-                        self.run_response.extra_data.add_messages = messages_to_add_to_run_response
-                    else:
-                        self.run_response.extra_data.add_messages.extend(messages_to_add_to_run_response)
 
         # 3. Add history to run_messages
         if self.add_history_to_messages:
@@ -2480,6 +2580,8 @@ class Agent:
                 # Tag each message as coming from history
                 for _msg in history_copy:
                     _msg.from_history = True
+                    # Emit the history message
+                    self._emit_message(_msg)
 
                 log_debug(f"Adding {len(history_copy)} messages from history")
 
@@ -2512,6 +2614,8 @@ class Agent:
         if user_message is not None:
             run_messages.user_message = user_message
             run_messages.messages.append(user_message)
+            # Emit the user message
+            self._emit_message(user_message)
 
         # 5. Add messages to run_messages if provided
         if messages is not None and len(messages) > 0:
@@ -2521,12 +2625,17 @@ class Agent:
                     if run_messages.extra_messages is None:
                         run_messages.extra_messages = []
                     run_messages.extra_messages.append(_m)
+                    # Emit the additional message
+                    self._emit_message(_m)
                 elif isinstance(_m, dict):
                     try:
-                        run_messages.messages.append(Message.model_validate(_m))
+                        _m_parsed = Message.model_validate(_m)
+                        run_messages.messages.append(_m_parsed)
                         if run_messages.extra_messages is None:
                             run_messages.extra_messages = []
-                        run_messages.extra_messages.append(Message.model_validate(_m))
+                        run_messages.extra_messages.append(_m_parsed)
+                        # Emit the parsed additional message
+                        self._emit_message(_m_parsed)
                     except Exception as e:
                         log_warning(f"Failed to validate message: {e}")
 
@@ -4340,3 +4449,40 @@ class Agent:
                 break
 
             self.print_response(message=message, stream=stream, markdown=markdown, **kwargs)
+
+    def on_message(self, callback: Callable[[Message], None]) -> None:
+        """Register a callback to be called when a message is emitted."""
+        self._message_callbacks.append(callback)
+
+    def _emit_message(self, message: Message) -> None:
+        """Emit a message event to all registered callbacks."""
+        for callback in self._message_callbacks:
+            try:
+                callback(message)
+            except Exception as e:
+                log_warning(f"Error in message callback: {e}")
+
+    async def get_response(self, message: str, **kwargs) -> Message:
+        """Get a response from the model for a given message."""
+        # Get response from model
+        model_response = await self.model.aresponse(messages=[Message(role="user", content=message)])
+
+        # Create message from response
+        message = Message(
+            role=model_response.role or "assistant",
+            content=model_response.content,
+            thinking=model_response.thinking,
+            citations=model_response.citations,
+            add_to_agent_memory=True
+        )
+
+        # Add message to conversation
+        run_messages.messages.append(message)
+
+        # Emit the message
+        self._emit_message(message)
+
+        # Print response
+        self.print_response(message=message, stream=stream, markdown=markdown, **kwargs)
+
+        return message
